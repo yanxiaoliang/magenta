@@ -111,12 +111,23 @@ static mx_status_t dh_find_driver(const char* libname, driver_rec_t** out) {
         rec->status = ERR_IO;
         goto done;
     }
+    if (!rec->drv.ops) {
+        log(ERROR, "devhost: driver '%s' has NULL ops\n", libname);
+        rec->status = ERR_INVALID_ARGS;
+        goto done;
+    }
+    if (rec->drv.ops->version != DRIVER_OPS_VERSION) {
+        log(ERROR, "devhost: driver '%s' has bad driver ops version %lx, expecting %lx\n", libname,
+            rec->drv.ops->version, DRIVER_OPS_VERSION);
+        rec->status = ERR_INVALID_ARGS;
+        goto done;
+    }
 
-    memcpy(&rec->drv.ops, &di->driver->ops, sizeof(mx_driver_ops_t));
+    rec->drv.ops = di->driver->ops;
     rec->drv.flags = di->driver->flags;
 
-    if (rec->drv.ops.init) {
-        rec->status = rec->drv.ops.init(&rec->drv);
+    if (rec->drv.ops->init) {
+        rec->status = rec->drv.ops->init(&rec->drv);
         if (rec->status < 0) {
             log(ERROR, "devhost: driver '%s' failed in init: %d\n",
                 libname, rec->status);
@@ -220,8 +231,8 @@ static mx_status_t dh_handle_rpc_read(mx_handle_t h, iostate_t* ios) {
             if ((r = dh_find_driver(name, &rec)) < 0) {
                 log(ERROR, "devhost[%s] driver load failed: %d\n", path, r);
             } else {
-                if (rec->drv.ops.create) {
-                    r = rec->drv.ops.create(&rec->drv, "shadow", args, hin[1],
+                if (rec->drv.ops->create) {
+                    r = rec->drv.ops->create(&rec->drv, "shadow", args, hin[1],
                                             &newios->dev);
                 } else {
                     r = ERR_NOT_SUPPORTED;
@@ -257,8 +268,8 @@ static mx_status_t dh_handle_rpc_read(mx_handle_t h, iostate_t* ios) {
             log(ERROR, "devhost[%s] driver load failed: %d\n", path, r);
             //TODO: inform devcoord
         } else {
-            if (rec->drv.ops.bind) {
-                r = rec->drv.ops.bind(&rec->drv, ios->dev, &ios->dev->owner_cookie);
+            if (rec->drv.ops->bind) {
+                r = rec->drv.ops->bind(&rec->drv, ios->dev, &ios->dev->owner_cookie);
             } else {
                 r = ERR_NOT_SUPPORTED;
             }
