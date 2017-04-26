@@ -392,6 +392,10 @@ void platform_early_init(void)
     if (arena_size) {
         arena.size = arena_size;
     }
+    printf("ramdisk base: %" PRIxPTR "\n", (uintptr_t)ramdisk_base);
+    printf("ramdisk size: %lu KB\n", ramdisk_size >> 10);
+    printf("arena base: %" PRIxPTR "\n", (uintptr_t)arena.base);
+    printf("arena size %lu KB\n", arena.size >> 10);
     pmm_add_arena(&arena);
 
 #ifdef BOOTLOADER_RESERVE_START
