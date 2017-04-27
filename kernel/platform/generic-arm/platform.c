@@ -396,6 +396,14 @@ void platform_early_init(void)
     printf("ramdisk size: %lu KB\n", ramdisk_size >> 10);
     printf("arena base: %" PRIxPTR "\n", (uintptr_t)arena.base);
     printf("arena size %lu KB\n", arena.size >> 10);
+
+    // Impose a memory limit if one exists via the cmdline
+    uint64_t memory_limit = cmdline_get_uint64("kernel.memory-limit", 0);
+    uint64_t memory_limit_b = memory_limit << 20;
+    if (memory_limit > 0 && memory_limit_b < arena.size) {
+        arena.size = memory_limit_b;
+    }
+
     pmm_add_arena(&arena);
 
 #ifdef BOOTLOADER_RESERVE_START

@@ -79,54 +79,27 @@ static void boot_addr_range_reset(boot_addr_range_t *range)
  * array. it returns the total count of arenas which have been populated.
  */
 
+extern uint32_t __bss_end;
+extern uint32_t _end;
 static int mem_arena_init(boot_addr_range_t *range)
 {
     int used = 0;
-    uint64_t rd_base = bootloader.ramdisk_base;
-    uint64_t fb_base = bootloader.fb_base;
 
     TRACEF("ramdisk base %" PRIxPTR " size %lu\n"
-            "frame  base %u width %u height %u\n",
+            "frame base %" PRIxPTR " width %u height %u\n"
+            "bss end: %#" PRIxPTR "\n"
+            "end: %#" PRIxPTR "\n",
             bootloader.ramdisk_base, bootloader.ramdisk_size,
-            bootloader.fb_base, bootloader.fb_width, bootloader.fb_height);
+            (uintptr_t)bootloader.fb_base, bootloader.fb_width, bootloader.fb_height,
+            (uintptr_t)&__bss_end, (uintptr_t) &_end);
+
 
     // kernel.memory_limit allows an upper bound on cumulative size for "memory"
     // arena entries to be imposed, effectively imposing an artificial system
     // memory limit. If none is processed from the cmdline then the max is set
     // to the largest uint64 to keep the logic the same in all cases.
     uint64_t memory_allowed = cmdline_get_uint64("kernel.memory-limit", 0);
-    bool memory_limit_exists = memory_allowed;
-    bool fit_exists = false;
-
-    if (memory_limit_exists) {
-        // Report the limit, then switch to bytes for actual usage.
-        printf("Memory limit of %lu MB imposed on the system\n", memory_allowed);
-        memory_allowed *= MB;
-
-        // Walk the ranges once to see if there is a single 'memory' arena that
-        // can fit the entirety of our memory limit. If there is then note it so
-        // we search for one instead of reaching our total via adding up smaller
-        // arenas. This allows us to to have the largest contiguous block of
-        // memory that fits within the memory limits imposed by the cmdline arg.
-        // Future options might be to add only the largest range found along
-        // with the framebuffer and bootloader.
-        for (range->reset(range), range->advance(range);
-                !range->is_reset;
-                range->advance(range)) {
-            if (!range->is_mem) {
-                continue;
-            }
-
-            // Check if the limit fits within the range and it is not a special
-            // range we intend to add anyway.
-            if (range->size >= memory_allowed
-                    && (rd_base >= range->base && rd_base < range->base + range->size)
-                    && (fb_base >= range->base && fb_base < range->base + range->size)) {
-                fit_exists = true;
-                break;
-            }
-        }
-    }
+    bool is_memory_limit = memory_allowed;
 
     for (range->reset(range), range->advance(range);
          !range->is_reset && used < PMM_ARENAS;
@@ -153,50 +126,58 @@ static int mem_arena_init(boot_addr_range_t *range)
             size -= adjust;
         }
 
-        // We need the range(s) that contain the boot data, ramdisk, and
-        // framebuffer regardless, so add the current range if they're contained
-        // within. They'll be accounted for later and not usable for the heap.
-        // Any range less than a MB is also considered a protected range as
-        // well due to it being 
-        bool is_protected_range = false;
-        if ((rd_base >= base && rd_base < base + size)
-                || (fb_base >= base && fb_base < base + size)
-                || size < 1 * MB) {
-                is_protected_range = true;
-        }
+        // A memory limit has been imposed upon the system
+        if (is_memory_limit) {
+            /* The kernel is located at 0x100000 physical, and the linker
+             * links everything at 0xffffffff80000000 (KERNEL_BASE). From
+             * the end of the kernel bss/ro data (_end) there is a large
+             * range of memory before the ramdisk is found. To account for
+             * this in the arenas it's easiest to split this range into two
+             * separate arenas so finer tuning of the pages passed to the PMM
+             * later can be managed.
+             */
+            if (base == KERNEL_LOAD_OFFSET) {
+                pmm_arena_info_t* kernel_arena = &mem_arenas[used];
+                kernel_arena->base = base;
 
-        TRACEF("allowed: %lu %" PRIx64 "\n", memory_allowed, memory_allowed);
-        if (!is_protected_range && memory_limit_exists) {
-            if (memory_allowed == 0) {
-                LTRACEF("Skipping pmm range at %#" PRIxPTR " of %#zx bytes due to memory limit.\n",
-                        base, size);
-                continue;
-            }
+                kernel_arena->size = (uintptr_t)&_end - KERNEL_BASE - KERNEL_LOAD_OFFSET;
+                kernel_arena->name = "kernel memory";
+                kernel_arena->priority = 1;
+                kernel_arena->flags = PMM_ARENA_FLAG_KMAP;
+                printf("base %#" PRIxPTR "\n", base);
+                printf("rd base %#" PRIxPTR "\n", bootloader.ramdisk_base);
+                TRACEF("Adding pmm range at %#" PRIxPTR " of %#zx bytes.\n", kernel_arena->base, kernel_arena->size);
+                used++;
 
-            // If we know a range exists that we fit into we can ignore
-            // any range that we don't fit into.
-            if (fit_exists && memory_allowed > size) {
-                continue;
-            }
-
-            // handle truncating to fit within any defined memory limits
-            if (memory_allowed >= size) {
-                memory_allowed -= size;
+                pmm_arena_info_t* boot_arena = &mem_arenas[used];
+                boot_arena->base = bootloader.ramdisk_base;
+                boot_arena->size = ROUNDUP_PAGE_SIZE(bootloader.ramdisk_size);
+                boot_arena->name = "bootdata memory";
+                boot_arena->priority = 1;
+                boot_arena->flags = PMM_ARENA_FLAG_KMAP;
+                TRACEF("Adding pmm range at %#" PRIxPTR " of %#zx bytes.\n", boot_arena->base, boot_arena->size);
+                used++;
             } else {
-                size = ROUNDDOWN(memory_allowed, PAGE_SIZE);
-                memory_allowed = 0;
+            pmm_arena_info_t *arena = &mem_arenas[used];
+            arena->base = base;
+            arena->size = size;
+            arena->name = "memory";
+            arena->priority = 1;
+            arena->flags = PMM_ARENA_FLAG_KMAP;
+            TRACEF("Adding pmm range at %#" PRIxPTR " of %#zx bytes.\n", arena->base, arena->size);
+            used++;
             }
+        } else {
+            pmm_arena_info_t *arena = &mem_arenas[used];
+            arena->base = base;
+            arena->size = size;
+            arena->name = "memory";
+            arena->priority = 1;
+            arena->flags = PMM_ARENA_FLAG_KMAP;
+            TRACEF("Adding pmm range at %#" PRIxPTR " of %#zx bytes.\n", arena->base, arena->size);
+            used++;
         }
 
-        pmm_arena_info_t *arena = &mem_arenas[used];
-        arena->base = base;
-        arena->size = size;
-        arena->name = "memory";
-        arena->priority = 1;
-        arena->flags = PMM_ARENA_FLAG_KMAP;
-        used++;
-
-        LTRACEF("Adding pmm range at %#" PRIxPTR " of %#zx bytes.\n", arena->base, arena->size);
     }
 
     return used;
