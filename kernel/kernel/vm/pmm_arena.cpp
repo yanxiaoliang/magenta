@@ -231,8 +231,9 @@ status_t PmmArena::FreePage(vm_page_t* page) {
 }
 
 void PmmArena::Dump(bool dump_pages, bool dump_free_ranges) {
-    printf("arena %p: name '%s' base %#" PRIxPTR " size 0x%zx priority %u flags 0x%x\n", this, name(), base(),
-           size(), priority(), flags());
+    size_t size_mb = size() >> 20;
+    printf("arena %p: name '%s' base %#" PRIxPTR " size 0x%zx (%c%zu MB) priority %u flags 0x%x\n", this, name(), base(),
+           size(), (size_mb) ? '\0' : '<', (size_mb) ? size_mb : 1, priority(), flags());
     printf("\tpage_array %p, free_count %zu\n", page_array_, free_count_);
 
     /* dump all of the pages */
