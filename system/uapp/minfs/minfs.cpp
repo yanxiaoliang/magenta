@@ -57,7 +57,7 @@ mx_status_t minfs_check_info(minfs_info_t* info, uint32_t max) {
         return ERR_INVALID_ARGS;
     }
     if (info->block_count > max) {
-        error("minfs: too large for device\n");
+        error("minfs: too large for device, block count = %u, max = %u\n", info->block_count, max);
         return ERR_INVALID_ARGS;
     }
     //TODO: validate layout

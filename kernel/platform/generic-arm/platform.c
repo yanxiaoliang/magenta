@@ -255,6 +255,117 @@ static void platform_cpu_early_init(mdi_node_ref_t* cpu_map) {
     arch_init_cpu_map(cpu_cluster_count, cpu_cluster_cpus);
 }
 
+
+#if BCM2837
+
+#define BCM2837_CPU_SPIN_TABLE_ADDR   0Xd8
+
+// Make sure that the KERNEL_SPIN_OFFSET is completely clear of the Spin table
+// since we don't want to overwrite 
+#define KERNEL_SPIN_OFFSET (ROUNDUP(BCM2837_CPU_SPIN_TABLE_ADDR + (sizeof(uintptr_t) * SMP_MAX_CPUS), CACHE_LINE))
+
+// Prototype of assembly function where the CPU will be parked.
+typedef void (*park_cpu)(uint32_t cpuid, uintptr_t spin_table_addr);
+
+// Implemented in Assembly.
+extern void bcm28xx_park_cpu(void);
+extern void bcm28xx_park_cpu_end(void);
+
+static mutex_t cpu_halt_lock = MUTEX_INITIAL_VALUE(cpu_halt_lock);
+static vmm_aspace_t* halt_aspace = NULL;
+static bool mapped_boot_pages = false;
+
+void platform_halt_cpu(void) {
+    status_t result;
+    mutex_acquire(&cpu_halt_lock);
+    // If we're the first CPU to halt then we need to create an address space to
+    // park the CPUs in. Any subsequent calls to platform_halt_cpu will also
+    // share this address space.
+    if (!halt_aspace) {
+        result = vmm_create_aspace(&halt_aspace, "halt_cpu", 
+                                   VMM_ASPACE_TYPE_LOW_KERNEL);
+        if (result != NO_ERROR) {
+            printf("failed to create halt_cpu vm aspace\n");
+            goto exit;
+        }
+    }
+
+    // Create an identity mapped page at the base of RAM. This is where the
+    // BCM28xx puts its bootcode. 
+    if (!mapped_boot_pages) {
+        paddr_t pa = 0;
+        void* base_of_ram = NULL;
+        const uint perm_flags_rwx = ARCH_MMU_FLAG_PERM_READ  | 
+                                    ARCH_MMU_FLAG_PERM_WRITE | 
+                                    ARCH_MMU_FLAG_PERM_EXECUTE;
+
+        // Map a page in this ASpace at address 0, where we'll be parking
+        // the core after it halts.
+        status_t result = vmm_alloc_physical(halt_aspace, "halt_mapping",
+                                             PAGE_SIZE, &base_of_ram, 0, 0, pa,
+                                             VMM_FLAG_VALLOC_SPECIFIC,
+                                             perm_flags_rwx);
+    
+
+        if (result != NO_ERROR) {
+            printf("Unable to allocate physical at vaddr = %p, paddr = %p\n",
+                   base_of_ram, (void*)pa);
+            goto exit;
+        }
+
+        // Copy the spin loop into the base of RAM. This is where we will park
+        // the CPU.
+        size_t bcm28xx_park_cpu_length = (uintptr_t)bcm28xx_park_cpu_end -
+                                         (uintptr_t)bcm28xx_park_cpu;
+
+        DEBUG_ASSERT(bcm28xx_park_cpu_length < PAGE_SIZE);
+
+        memcpy((void*)KERNEL_ASPACE_BASE + 0x100, bcm28xx_park_cpu, bcm28xx_park_cpu_length);
+
+        __asm__ __volatile__ ("" : : : "memory");
+        arch_clean_cache_range(KERNEL_ASPACE_BASE, 4096);     // clean out all the VC bootstrap area
+        arch_sync_cache_range(KERNEL_ASPACE_BASE, 4096);     // clean out all the VC bootstrap area
+        
+
+        // Only the first core that calls this method needs to setup the address
+        // space and load the bootcode into the base of RAM so once this call
+        // succeeds all subsequent cores can simply use what was provided by
+        // the first core.
+        mapped_boot_pages = true;
+    }
+
+    mutex_release(&cpu_halt_lock);
+
+    vmm_set_active_aspace(halt_aspace);
+
+    arch_clean_cache_range(KERNEL_ASPACE_BASE, 4096);
+    arch_sync_cache_range(KERNEL_ASPACE_BASE, 4096);
+    arch_clean_cache_range(0, 4096);
+    arch_sync_cache_range(KERNEL_ASPACE_BASE, 4096);
+
+    thread_t *self = get_current_thread();
+    const uint cpuid = thread_last_cpu(self);
+
+    mp_set_curr_cpu_active(false);
+    mp_set_curr_cpu_online(false);
+    
+    park_cpu park = (park_cpu)0x100;
+    park(cpuid, 0xd8);
+
+    panic("control should never reach here");
+
+exit:
+    mutex_release(&cpu_halt_lock);
+}
+
+#else
+
+void platform_halt_cpu(void) {
+    PANIC_UNIMPLEMENTED;
+}
+
+#endif
+
 static void platform_start_cpu(uint cluster, uint cpu) {
 #if BCM2837
     uintptr_t sec_entry = (uintptr_t)(&arm_reset - KERNEL_ASPACE_BASE);
